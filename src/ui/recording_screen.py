@@ -1,31 +1,44 @@
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtGui import QPixmap, QImage, QPainter, QFont, QColor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QProgressBar, QMessageBox, QFileDialog,
 )
 
 from src.capture.camera import CameraThread, find_available_camera
+from src.config import AppConfig
 from src.task_guide.guide import TaskGuide, TASK_STEPS
 from src.db.models import update_session, get_participant, get_session
 
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
+_COUNTDOWN_SECONDS = 3
+
 
 class RecordingScreen(QWidget):
     recording_done = Signal(int)   # session_id
 
-    def __init__(self, parent=None):
+    def __init__(self, config: AppConfig, parent=None):
         super().__init__(parent)
+        self._config = config
         self._session_id: int | None = None
         self._camera: CameraThread | None = None
         self._guide = TaskGuide(self)
         self._recording = False
         self._frame_count = 0
         self._fps_display = 0.0
+        self._hand_detected = False
+
+        # Countdown state
+        self._countdown_active = False
+        self._countdown_value = 0
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(1000)
+        self._countdown_timer.timeout.connect(self._countdown_tick)
 
         self._build_ui()
         self._guide.step_changed.connect(self._on_step_changed)
@@ -40,7 +53,7 @@ class RecordingScreen(QWidget):
         self._preview = QLabel("Camera preview")
         self._preview.setAlignment(Qt.AlignCenter)
         self._preview.setMinimumSize(640, 480)
-        self._preview.setStyleSheet("background: #111; color: #666;")
+        self._preview.setStyleSheet("background: #111; color: #666; border: 3px solid #333;")
         left.addWidget(self._preview)
 
         stats = QHBoxLayout()
@@ -51,11 +64,18 @@ class RecordingScreen(QWidget):
         stats.addWidget(self._lbl_frames)
         left.addLayout(stats)
 
+        btn_row = QHBoxLayout()
         self._btn_record = QPushButton("Start Recording")
         self._btn_record.setFixedHeight(44)
         self._btn_record.setEnabled(False)
         self._btn_record.clicked.connect(self._toggle_recording)
-        left.addWidget(self._btn_record)
+        btn_row.addWidget(self._btn_record)
+
+        self._btn_settings = QPushButton("Settings")
+        self._btn_settings.setFixedHeight(44)
+        self._btn_settings.clicked.connect(self._open_settings)
+        btn_row.addWidget(self._btn_settings)
+        left.addLayout(btn_row)
 
         self._btn_load_video = QPushButton("Load Existing Video…")
         self._btn_load_video.setFixedHeight(36)
@@ -106,10 +126,26 @@ class RecordingScreen(QWidget):
         right.addStretch()
         root.addLayout(right, 1)
 
+    def apply_config(self, config: AppConfig):
+        self._config = config
+        self._rebuild_guide()
+
+    def _rebuild_guide(self):
+        self._guide.stop()
+        self._guide = TaskGuide(
+            self,
+            durations=self._config.task_durations,
+            audio_cues=self._config.audio_cues,
+        )
+        self._guide.step_changed.connect(self._on_step_changed)
+        self._guide.tick.connect(self._on_tick)
+        self._guide.completed.connect(self._on_guide_completed)
+
     def load_session(self, session_id: int):
         self._session_id = session_id
         self._frame_count = 0
         self._recording = False
+        self._hand_detected = False
         self._btn_record.setText("Start Recording")
         self._btn_record.setEnabled(False)
         self._btn_start_guide.setEnabled(False)
@@ -117,18 +153,30 @@ class RecordingScreen(QWidget):
         self._lbl_instruction.setText("")
         self._lbl_countdown.setText("")
         self._progress_steps.setValue(0)
+        self._preview.setStyleSheet("background: #111; color: #666; border: 3px solid #333;")
 
         if self._camera:
             self._camera.stop()
             self._camera = None
+
+        self._rebuild_guide()
 
         camera_index = find_available_camera()
         if camera_index is None:
             self._on_no_camera()
             return
 
-        self._camera = CameraThread(camera_index)
+        session = get_session(session_id)
+        dominant_hand = session["dominant_hand"] if session else "right"
+
+        self._camera = CameraThread(
+            camera_index,
+            resolution=self._config.resolution,
+            fps=self._config.fps,
+            dominant_hand=dominant_hand,
+        )
         self._camera.frame_ready.connect(self._on_frame)
+        self._camera.hand_presence.connect(self._on_hand_presence)
         self._camera.error.connect(self._on_camera_error)
         self._camera.start()
         QTimer.singleShot(1000, self._camera_ready)
@@ -136,8 +184,7 @@ class RecordingScreen(QWidget):
     def _on_no_camera(self):
         self._preview.setText(
             "No camera detected.\n\n"
-            "On WSL2, attach your webcam via usbipd-win,\n"
-            "or use 'Load Existing Video' to process a pre-recorded file."
+            "Use 'Load Existing Video' to process a pre-recorded file."
         )
         self._lbl_step_name.setText("No Camera")
         self._lbl_instruction.setText("You can still run the task guide or load a video.")
@@ -149,13 +196,35 @@ class RecordingScreen(QWidget):
         self._lbl_step_name.setText("Ready")
         self._lbl_instruction.setText("Press 'Start Task Guide' to begin, then 'Start Recording'.")
 
+    def _on_hand_presence(self, detected: bool):
+        self._hand_detected = detected
+        color = "#22aa44" if detected else "#aa2222"
+        self._preview.setStyleSheet(
+            f"background: #111; color: #666; border: 3px solid {color};"
+        )
+
     def _on_frame(self, image: QImage, fps: float):
         self._fps_display = fps
-        pixmap = QPixmap.fromImage(image).scaled(
-            self._preview.width(), self._preview.height(),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation,
-        )
-        self._preview.setPixmap(pixmap)
+
+        if self._countdown_active:
+            # Paint countdown number over the frame
+            pixmap = QPixmap.fromImage(image).scaled(
+                self._preview.width(), self._preview.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation,
+            )
+            painter = QPainter(pixmap)
+            painter.setFont(QFont("Arial", 96, QFont.Bold))
+            painter.setPen(QColor(255, 80, 80))
+            painter.drawText(pixmap.rect(), Qt.AlignCenter, str(self._countdown_value))
+            painter.end()
+            self._preview.setPixmap(pixmap)
+        else:
+            pixmap = QPixmap.fromImage(image).scaled(
+                self._preview.width(), self._preview.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation,
+            )
+            self._preview.setPixmap(pixmap)
+
         if self._recording:
             self._frame_count += 1
             self._lbl_frames.setText(f"Frames: {self._frame_count}")
@@ -163,6 +232,12 @@ class RecordingScreen(QWidget):
 
     def _on_camera_error(self, msg: str):
         self._on_no_camera()
+
+    def _open_settings(self):
+        from src.ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self._config, self)
+        if dlg.exec():
+            self._config = dlg.get_config()
 
     def _load_existing_video(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -176,7 +251,6 @@ class RecordingScreen(QWidget):
         out_dir = DATA_DIR / p_code / f"S{self._session_id:03d}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        import shutil
         dest = str(out_dir / "video.mp4")
         if path != dest:
             shutil.copy2(path, dest)
@@ -204,10 +278,27 @@ class RecordingScreen(QWidget):
         self._btn_skip.setEnabled(False)
 
     def _toggle_recording(self):
+        if self._countdown_active:
+            return
         if not self._recording:
-            self._start_recording()
+            self._begin_countdown()
         else:
             self._stop_recording()
+
+    def _begin_countdown(self):
+        self._countdown_active = True
+        self._countdown_value = _COUNTDOWN_SECONDS
+        self._btn_record.setEnabled(False)
+        self._countdown_timer.start()
+
+    def _countdown_tick(self):
+        if self._countdown_value <= 0:
+            self._countdown_timer.stop()
+            self._countdown_active = False
+            self._btn_record.setEnabled(True)
+            self._start_recording()
+            return
+        self._countdown_value -= 1
 
     def _start_recording(self):
         session = get_session(self._session_id)
@@ -217,7 +308,8 @@ class RecordingScreen(QWidget):
         out_dir.mkdir(parents=True, exist_ok=True)
         video_path = str(out_dir / "video.mp4")
 
-        self._camera.start_recording(video_path, fps=30.0, width=640, height=480)
+        w, h = self._config.resolution
+        self._camera.start_recording(video_path, fps=float(self._config.fps), width=w, height=h)
         self._recording = True
         self._frame_count = 0
         self._btn_record.setText("Stop Recording")
@@ -236,10 +328,10 @@ class RecordingScreen(QWidget):
             self._stop_recording()
         if self._camera:
             self._camera.stop()
-        # Navigate back — handled by MainWindow
-        self.parent().show_home()
+        self.window().show_home()
 
     def cleanup(self):
         self._guide.stop()
+        self._countdown_timer.stop()
         if self._camera:
             self._camera.stop()

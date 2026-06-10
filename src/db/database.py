@@ -43,3 +43,5 @@ def init_db():
                 label TEXT NOT NULL
             );
         """)
+        from src.db.migrations import run_migrations
+        run_migrations(conn)

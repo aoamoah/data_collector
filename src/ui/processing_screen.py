@@ -5,8 +5,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QProgressBar, QPushButton, QMessageBox,
 )
 
+from src.config import AppConfig
 from src.processing.extractor import ExtractorThread
-from src.db.models import get_session, get_participant, update_session
+from src.processing.quality import QualityReportDialog
+from src.db.models import get_session, get_participant, update_session, save_quality_report
 
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
@@ -15,8 +17,9 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 class ProcessingScreen(QWidget):
     processing_done = Signal(int)   # session_id
 
-    def __init__(self, parent=None):
+    def __init__(self, config: AppConfig, parent=None):
         super().__init__(parent)
+        self._config = config
         self._session_id: int | None = None
         self._worker: ExtractorThread | None = None
         self._build_ui()
@@ -50,6 +53,9 @@ class ProcessingScreen(QWidget):
         self._btn_continue.clicked.connect(lambda: self.processing_done.emit(self._session_id))
         layout.addWidget(self._btn_continue, alignment=Qt.AlignCenter)
 
+    def apply_config(self, config: AppConfig):
+        self._config = config
+
     def load_session(self, session_id: int):
         self._session_id = session_id
         self._progress.setValue(0)
@@ -66,8 +72,12 @@ class ProcessingScreen(QWidget):
         p_code = participant["participant_code"]
         out_csv = str(DATA_DIR / p_code / f"S{session_id:03d}" / "landmarks.csv")
 
-        self._worker = ExtractorThread(video_path, out_csv)
+        self._worker = ExtractorThread(
+            video_path, out_csv,
+            confidence_threshold=self._config.confidence_threshold,
+        )
         self._worker.progress.connect(self._on_progress)
+        self._worker.quality_ready.connect(self._on_quality_ready)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
@@ -78,6 +88,12 @@ class ProcessingScreen(QWidget):
             self._progress.setValue(current)
             self._lbl_frames.setText(f"Frame {current} / {total}")
             self._lbl_status.setText("Running MediaPipe Hands…")
+
+    def _on_quality_ready(self, report: dict):
+        if self._session_id:
+            save_quality_report(self._session_id, report)
+        dlg = QualityReportDialog(report, self)
+        dlg.exec()
 
     def _on_finished(self, csv_path: str):
         update_session(self._session_id, landmarks_path=csv_path, status="processed")

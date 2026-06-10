@@ -1,7 +1,1 @@
 /venv
-
-*.db
-
-/dataset
-
-/data/*

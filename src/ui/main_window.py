@@ -1,9 +1,11 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QStackedWidget, QVBoxLayout,
-    QPushButton, QLabel, QMessageBox,
+    QPushButton, QLabel, QMessageBox, QDialog, QComboBox,
+    QDialogButtonBox,
 )
 
+from src.config import AppConfig
 from src.db.models import get_all_participants, get_session
 from src.ui.participant_form import ParticipantForm
 from src.ui.session_form import SessionForm
@@ -25,12 +27,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("AirWrite Capture")
         self.setMinimumSize(900, 650)
 
+        self._config = AppConfig()
+
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
 
         self._home = self._build_home()
-        self._recording = RecordingScreen(self)
-        self._processing = ProcessingScreen(self)
+        self._recording = RecordingScreen(self._config, self)
+        self._processing = ProcessingScreen(self._config, self)
         self._annotation = AnnotationScreen(self)
 
         self._stack.addWidget(self._home)       # 0
@@ -68,6 +72,7 @@ class MainWindow(QMainWindow):
             ("New Participant", self._on_new_participant),
             ("New Session", self._on_new_session),
             ("Open Session", self._on_open_session),
+            ("Settings", self._on_settings),
         ]:
             btn = QPushButton(label)
             btn.setFixedWidth(220)
@@ -83,6 +88,7 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(PAGE_HOME)
 
     def _go_to_processing(self, session_id: int):
+        self._processing.apply_config(self._config)
         self._processing.load_session(session_id)
         self._stack.setCurrentIndex(PAGE_PROCESSING)
 
@@ -106,16 +112,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Participants", "Create a participant first.")
             return
 
-        # Let user pick participant inline via SessionBrowser-style combo in SessionForm.
-        # For simplicity: use the most-recently-added participant by default but let them
-        # choose via session browser.
         browser = _ParticipantPicker(participants, self)
         if not browser.exec():
             return
         p = browser.selected
 
-        dlg = SessionForm(p["id"], p["participant_code"], self)
+        dlg = SessionForm(p["id"], p["participant_code"], self._config, self)
         if dlg.exec() and dlg.session_id:
+            self._recording.apply_config(self._config)
             self._recording.load_session(dlg.session_id)
             self._stack.setCurrentIndex(PAGE_RECORDING)
 
@@ -127,17 +131,24 @@ class MainWindow(QMainWindow):
             status = session["status"]
 
             if status in ("created", "recording", "recorded"):
+                self._recording.apply_config(self._config)
                 self._recording.load_session(session_id)
                 self._stack.setCurrentIndex(PAGE_RECORDING)
-            elif status == "processed":
-                self._annotation.load_session(session_id)
-                self._stack.setCurrentIndex(PAGE_ANNOTATION)
-            elif status in ("annotated", "exported"):
+            elif status in ("processed", "annotated", "exported"):
                 self._annotation.load_session(session_id)
                 self._stack.setCurrentIndex(PAGE_ANNOTATION)
             else:
+                self._recording.apply_config(self._config)
                 self._recording.load_session(session_id)
                 self._stack.setCurrentIndex(PAGE_RECORDING)
+
+    def _on_settings(self):
+        from src.ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self._config, self)
+        if dlg.exec():
+            self._config = dlg.get_config()
+            self._recording.apply_config(self._config)
+            self._processing.apply_config(self._config)
 
     def closeEvent(self, event):
         self._recording.cleanup()
@@ -146,9 +157,6 @@ class MainWindow(QMainWindow):
 
 
 # ---- small helper dialog for participant selection ----
-
-from PySide6.QtWidgets import QDialog, QComboBox, QDialogButtonBox
-
 
 class _ParticipantPicker(QDialog):
     def __init__(self, participants, parent=None):
