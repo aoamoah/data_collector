@@ -22,6 +22,12 @@ class SessionForm(QDialog):
         layout.addWidget(QLabel(f"Participant: <b>{participant_code}</b>"))
 
         form = QFormLayout()
+        self._dataset = QComboBox()
+        self._dataset.addItems(["dataset", "dataset_WITA", "dataset_IPN"])
+        self._dataset.setToolTip(
+            "Which collection this session belongs to — determines the folder "
+            "the exported files go into."
+        )
         self._lighting = QComboBox()
         self._lighting.addItems(["bright", "normal", "dim"])
         self._background = QComboBox()
@@ -29,6 +35,7 @@ class SessionForm(QDialog):
         self._dominant_hand = QComboBox()
         self._dominant_hand.addItems(["right", "left"])
 
+        form.addRow("Dataset", self._dataset)
         form.addRow("Lighting", self._lighting)
         form.addRow("Background", self._background)
         form.addRow("Dominant Hand", self._dominant_hand)
@@ -62,5 +69,6 @@ class SessionForm(QDialog):
             self._background.currentText(),
             self._dominant_hand.currentText(),
             notes=self._notes.toPlainText().strip(),
+            dataset=self._dataset.currentText(),
         )
         self.accept()

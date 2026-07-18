@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
             ("New Participant", self._on_new_participant),
             ("New Session", self._on_new_session),
             ("Open Session", self._on_open_session),
+            ("Bulk Import Videos", self._on_bulk_import),
             ("Settings", self._on_settings),
         ]:
             btn = QPushButton(label)
@@ -152,6 +153,11 @@ class MainWindow(QMainWindow):
                 self._recording.apply_config(self._config)
                 self._recording.load_session(session_id)
                 self._stack.setCurrentIndex(PAGE_RECORDING)
+
+    def _on_bulk_import(self):
+        from src.ui.bulk_import_dialog import BulkImportDialog
+        dlg = BulkImportDialog(self._config, self)
+        dlg.exec()
 
     def _on_settings(self):
         from src.ui.settings_dialog import SettingsDialog

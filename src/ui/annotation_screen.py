@@ -22,7 +22,6 @@ from src.export.exporter import export_session, validate_export
 
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
-DATASET_DIR = Path(__file__).parent.parent.parent / "dataset"
 
 # MediaPipe hand skeleton connections (21 landmarks)
 HAND_CONNECTIONS = [
@@ -394,7 +393,7 @@ class AnnotationScreen(QWidget):
             if reply != QMessageBox.Yes:
                 return
         try:
-            out = export_session(self._session_id, str(DATASET_DIR))
+            out = export_session(self._session_id)
             QMessageBox.information(self, "Exported", f"Dataset exported to:\n{out}")
             update_session(self._session_id, status="exported")
         except Exception as e:

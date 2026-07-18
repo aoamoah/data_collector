@@ -4,7 +4,9 @@ import shutil
 from pathlib import Path
 
 from src.db.models import get_session, get_participant
-from src.db.paths import resolve_data_path
+from src.db.paths import PROJECT_ROOT, resolve_data_path
+
+DATASET_FOLDERS = ["dataset", "dataset_WITA", "dataset_IPN"]
 
 
 def validate_export(session, total_frames: int) -> list[str]:
@@ -31,8 +33,13 @@ def validate_export(session, total_frames: int) -> list[str]:
     return warnings
 
 
-def export_session(session_id: int, dataset_dir: str) -> str:
+def export_session(session_id: int, dataset_dir: str | None = None) -> str:
+    """Export a session. The output root defaults to the dataset folder the
+    session was assigned on creation (dataset / dataset_WITA / dataset_IPN)."""
     session = get_session(session_id)
+    if dataset_dir is None:
+        name = session["dataset"] if "dataset" in session.keys() else None
+        dataset_dir = PROJECT_ROOT / (name or "dataset")
     participant = get_participant(session["participant_id"])
 
     p_code = participant["participant_code"]
@@ -56,6 +63,7 @@ def export_session(session_id: int, dataset_dir: str) -> str:
     metadata = {
         "participant_id": p_code,
         "session_id": s_code,
+        "dataset": session["dataset"] if "dataset" in session.keys() else "dataset",
         "lighting": session["lighting"],
         "background": session["background"],
         "dominant_hand": session["dominant_hand"],

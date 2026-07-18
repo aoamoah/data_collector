@@ -22,3 +22,10 @@ def run_migrations(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE sessions ADD COLUMN quality_report TEXT DEFAULT NULL")
         conn.commit()
         _set_schema_version(conn, 2)
+
+    if version < 3:
+        # Which dataset collection the session belongs to (its export target):
+        # dataset (own recordings), dataset_WITA, dataset_IPN
+        conn.execute("ALTER TABLE sessions ADD COLUMN dataset TEXT DEFAULT 'dataset'")
+        conn.commit()
+        _set_schema_version(conn, 3)

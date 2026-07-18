@@ -44,14 +44,16 @@ def add_session(
     background: str,
     dominant_hand: str,
     notes: str = "",
+    dataset: str = "dataset",
 ) -> int:
     now = datetime.now().isoformat()
     with get_connection() as conn:
         cur = conn.execute(
             """INSERT INTO sessions
-               (participant_id, date_created, lighting, background, dominant_hand, notes, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'created')""",
-            (participant_id, now, lighting, background, dominant_hand, notes),
+               (participant_id, date_created, lighting, background, dominant_hand,
+                notes, dataset, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'created')""",
+            (participant_id, now, lighting, background, dominant_hand, notes, dataset),
         )
         return cur.lastrowid
 

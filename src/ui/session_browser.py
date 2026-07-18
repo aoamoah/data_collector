@@ -94,8 +94,10 @@ class SessionBrowser(QDialog):
         for s in sessions:
             flagged = bool(s["flagged"]) if "flagged" in s.keys() else False
             flag_str = "  [FLAGGED]" if flagged else ""
+            ds_name = s["dataset"] if "dataset" in s.keys() and s["dataset"] else "dataset"
             item = QListWidgetItem(
-                f"Session {s['id']} — {s['date_created'][:19]}  [{s['status']}]{flag_str}"
+                f"Session {s['id']} — {s['date_created'][:19]}  [{s['status']}]"
+                f"  ({ds_name}){flag_str}"
             )
             item.setData(256, s["id"])
             item.setData(257, p_id)

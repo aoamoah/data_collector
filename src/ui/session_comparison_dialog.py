@@ -20,7 +20,7 @@ class SessionComparisonDialog(QDialog):
         layout.addWidget(QLabel("<b>All Sessions — Quality Comparison</b>"))
 
         columns = [
-            "Participant", "Session", "Date", "Lighting",
+            "Participant", "Session", "Dataset", "Date", "Lighting",
             "Background", "Hand", "Status", "% Detected", "Avg Conf.", "Flagged",
         ]
         sessions = get_all_sessions()
@@ -49,6 +49,7 @@ class SessionComparisonDialog(QDialog):
             values = [
                 s["participant_code"],
                 f"S{s['id']:03d}",
+                (s["dataset"] if "dataset" in s.keys() else None) or "dataset",
                 s["date_created"][:10],
                 s["lighting"] or "—",
                 s["background"] or "—",
@@ -64,7 +65,7 @@ class SessionComparisonDialog(QDialog):
                 item.setTextAlignment(Qt.AlignCenter)
                 if flagged:
                     item.setForeground(QColor("#cc4444"))
-                elif isinstance(pct, (int, float)) and pct < 50 and col == 7:
+                elif isinstance(pct, (int, float)) and pct < 50 and col == columns.index("% Detected"):
                     item.setForeground(QColor("#cc8800"))
                 self._table.setItem(row, col, item)
 
