@@ -149,13 +149,16 @@ Output structure:
 
 ```text
 dataset/
-  participant_P001/
-    session_S001/
-      video.mp4
+  P001/
+    S001/
+      video.mp4     (extension follows the source container, e.g. video.avi)
       landmarks.csv
       labels.csv
       metadata.json
 ```
+
+Session codes use the global session id (`S018`), not a per-participant
+counter.
 
 ---
 
@@ -179,6 +182,11 @@ dataset/
 - landmarks_path
 - labels_path
 - status
+- notes
+- flagged
+- quality_report (JSON, written after extraction)
+
+Schema changes are applied via `src/db/migrations.py` using `PRAGMA user_version`.
 
 ### annotations
 - id
@@ -194,8 +202,13 @@ dataset/
 ### landmarks.csv
 
 ```csv
-frame_index,timestamp_ms,hand_detected,l0_x,l0_y,l0_z,...,l20_x,l20_y,l20_z
+frame_index,timestamp_ms,hand_detected,detection_confidence,tracking_confidence,l0_x,l0_y,l0_z,...,l20_x,l20_y,l20_z
 ```
+
+Note: MediaPipe's HandLandmarker only exposes a handedness classification
+score per hand. Both `detection_confidence` and `tracking_confidence` contain
+that score, kept as two columns for backward compatibility with existing
+exports.
 
 ### labels.csv
 

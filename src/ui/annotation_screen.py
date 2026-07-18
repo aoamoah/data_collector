@@ -17,6 +17,7 @@ from src.db.models import (
     get_session, get_participant, get_annotations_for_session,
     add_annotation, delete_annotations_for_session, update_session,
 )
+from src.db.paths import resolve_data_path
 from src.export.exporter import export_session, validate_export
 
 
@@ -36,6 +37,7 @@ HAND_CONNECTIONS = [
 
 class AnnotationScreen(QWidget):
     done = Signal()
+    reprocess_requested = Signal(int)   # session_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -150,6 +152,10 @@ class AnnotationScreen(QWidget):
         self._btn_export.clicked.connect(self._export)
         action_layout.addWidget(self._btn_export)
 
+        self._btn_reextract = QPushButton("Re-extract Landmarks")
+        self._btn_reextract.clicked.connect(self._on_reextract)
+        action_layout.addWidget(self._btn_reextract)
+
         self._btn_done = QPushButton("Back to Home")
         self._btn_done.clicked.connect(self._on_done)
         action_layout.addWidget(self._btn_done)
@@ -187,8 +193,8 @@ class AnnotationScreen(QWidget):
         self._landmarks = {}
 
         session = get_session(session_id)
-        video_path = session["video_path"]
-        if not video_path or not Path(video_path).exists():
+        video_path = resolve_data_path(session["video_path"])
+        if not video_path:
             QMessageBox.critical(self, "Error", "Video file not found.")
             return
 
@@ -206,8 +212,8 @@ class AnnotationScreen(QWidget):
         self._update_undo_redo_buttons()
 
         # Load landmarks if available
-        landmarks_path = session["landmarks_path"]
-        if landmarks_path and Path(landmarks_path).exists():
+        landmarks_path = resolve_data_path(session["landmarks_path"])
+        if landmarks_path:
             self._load_landmarks(landmarks_path)
 
     def _load_landmarks(self, path: str):
@@ -393,6 +399,13 @@ class AnnotationScreen(QWidget):
             update_session(self._session_id, status="exported")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
+
+    def _on_reextract(self):
+        if not self._session_id:
+            return
+        if self._playing:
+            self._toggle_play()
+        self.reprocess_requested.emit(self._session_id)
 
     def _on_done(self):
         if self._playing:

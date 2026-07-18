@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 
 from src.config import AppConfig
 from src.db.models import get_all_participants, get_session
+from src.db.paths import resolve_data_path
 from src.ui.participant_form import ParticipantForm
 from src.ui.session_form import SessionForm
 from src.ui.session_browser import SessionBrowser
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self._recording.recording_done.connect(self._go_to_processing)
         self._processing.processing_done.connect(self._go_to_annotation)
         self._annotation.done.connect(self.show_home)
+        self._annotation.reprocess_requested.connect(self._go_to_processing)
 
         self._stack.setCurrentIndex(PAGE_HOME)
 
@@ -127,10 +129,19 @@ class MainWindow(QMainWindow):
         dlg = SessionBrowser(self)
         if dlg.exec() and dlg.selected_session_id:
             session_id = dlg.selected_session_id
+
+            if dlg.reprocess_requested:
+                self._go_to_processing(session_id)
+                return
+
             session = get_session(session_id)
             status = session["status"]
 
-            if status in ("created", "recording", "recorded"):
+            has_video = resolve_data_path(session["video_path"]) is not None
+
+            if status == "recorded" and has_video:
+                self._go_to_processing(session_id)
+            elif status in ("created", "recording", "recorded"):
                 self._recording.apply_config(self._config)
                 self._recording.load_session(session_id)
                 self._stack.setCurrentIndex(PAGE_RECORDING)

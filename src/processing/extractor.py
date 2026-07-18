@@ -8,6 +8,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from PySide6.QtCore import QThread, Signal
 
+from src.processing.hand_selection import select_hand
 from src.processing.model_utils import ensure_model
 from src.processing.quality import FrameQuality, compute_quality_report
 
@@ -24,11 +25,18 @@ class ExtractorThread(QThread):
     quality_ready = Signal(dict)  # quality report dict
     error = Signal(str)
 
-    def __init__(self, video_path: str, output_csv: str, confidence_threshold: float = 0.0):
+    def __init__(
+        self,
+        video_path: str,
+        output_csv: str,
+        confidence_threshold: float = 0.0,
+        target_hand: str = "right",
+    ):
         super().__init__()
         self._video_path = video_path
         self._output_csv = output_csv
         self._confidence_threshold = confidence_threshold
+        self._target_hand = target_hand
 
     def run(self):
         try:
@@ -36,6 +44,7 @@ class ExtractorThread(QThread):
                 self._video_path,
                 self._output_csv,
                 confidence_threshold=self._confidence_threshold,
+                target_hand=self._target_hand,
                 progress_cb=lambda cur, total: self.progress.emit(cur, total),
             )
             self.quality_ready.emit(report)
@@ -48,9 +57,10 @@ def extract_landmarks(
     video_path: str,
     output_csv: str,
     confidence_threshold: float = 0.0,
+    target_hand: str = "right",
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> dict:
-    """Extract hand landmarks from video. Returns quality report dict."""
+    """Extract landmarks of the target hand from video. Returns quality report dict."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
@@ -61,14 +71,14 @@ def extract_landmarks(
     options = mp_vision.HandLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=ensure_model()),
         running_mode=mp_vision.RunningMode.VIDEO,
-        num_hands=1,
+        num_hands=2,
         min_hand_detection_confidence=0.5,
         min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
 
     frame_qualities: list[FrameQuality] = []
-    seen_timestamps: set[int] = set()
+    last_timestamp = -1
 
     with open(output_csv, "w", newline="") as f:
         writer = csv.writer(f)
@@ -83,18 +93,29 @@ def extract_landmarks(
 
                 timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
 
-                # Duplicate frame detection
-                is_duplicate = timestamp_ms in seen_timestamps and frame_index > 0
+                # MediaPipe VIDEO mode requires strictly increasing timestamps
+                # and raises on repeats, so duplicate/non-monotonic frames are
+                # recorded as undetected without running detection.
+                is_duplicate = frame_index > 0 and timestamp_ms <= last_timestamp
+
+                result = None
                 if not is_duplicate:
-                    seen_timestamps.add(timestamp_ms)
+                    last_timestamp = timestamp_ms
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                    result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                result = landmarker.detect_for_video(mp_image, timestamp_ms)
+                selected = None
+                if result:
+                    selected = select_hand(
+                        result.hand_landmarks, result.handedness, target_hand
+                    )
 
-                if result.hand_landmarks and result.handedness and not is_duplicate:
-                    lm = result.hand_landmarks[0]
-                    confidence = round(result.handedness[0][0].score, 4)
+                if selected:
+                    # HandLandmarker exposes only the handedness classification
+                    # score per hand; it fills both confidence columns.
+                    lm, score = selected
+                    confidence = round(score, 4)
 
                     # Apply confidence threshold filtering
                     if confidence >= confidence_threshold:

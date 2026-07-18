@@ -3,6 +3,7 @@ import random
 from pathlib import Path
 
 from src.db.models import get_session, get_participant
+from src.db.paths import resolve_data_path
 
 
 def export_multi_session(
@@ -26,11 +27,9 @@ def export_multi_session(
 
 
 def _load_session_rows(session) -> list[dict]:
-    landmarks_path = session["landmarks_path"]
-    labels_path = session["labels_path"]
+    landmarks_path = resolve_data_path(session["landmarks_path"])
+    labels_path = resolve_data_path(session["labels_path"])
     if not landmarks_path or not labels_path:
-        return []
-    if not Path(landmarks_path).exists() or not Path(labels_path).exists():
         return []
 
     participant = get_participant(session["participant_id"])

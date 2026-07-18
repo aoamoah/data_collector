@@ -1,3 +1,5 @@
+import re
+
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QLineEdit, QComboBox,
     QTextEdit, QDialogButtonBox, QVBoxLayout, QLabel, QMessageBox,
@@ -15,8 +17,15 @@ class ParticipantForm(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
+        # Suggest one past the highest existing number — counting rows would
+        # collide with surviving codes after a deletion
         existing = get_all_participants()
-        next_num = len(existing) + 1
+        nums = [
+            int(m.group(1))
+            for p in existing
+            if (m := re.fullmatch(r"P(\d+)", p["participant_code"]))
+        ]
+        next_num = max(nums, default=0) + 1
         self._code = QLineEdit(f"P{next_num:03d}")
         self._handedness = QComboBox()
         self._handedness.addItems(["right", "left", "ambidextrous"])

@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPainter, QFont, QColor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel,
-    QPushButton, QProgressBar, QMessageBox, QFileDialog,
+    QPushButton, QProgressBar, QFileDialog,
 )
 
 from src.capture.camera import CameraThread, find_available_camera
@@ -251,7 +251,10 @@ class RecordingScreen(QWidget):
         out_dir = DATA_DIR / p_code / f"S{self._session_id:03d}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        dest = str(out_dir / "video.mp4")
+        # Keep the source container format — renaming e.g. .avi content to
+        # .mp4 would lie about the container
+        suffix = Path(path).suffix.lower() or ".mp4"
+        dest = str(out_dir / f"video{suffix}")
         if path != dest:
             shutil.copy2(path, dest)
 
@@ -308,8 +311,7 @@ class RecordingScreen(QWidget):
         out_dir.mkdir(parents=True, exist_ok=True)
         video_path = str(out_dir / "video.mp4")
 
-        w, h = self._config.resolution
-        self._camera.start_recording(video_path, fps=float(self._config.fps), width=w, height=h)
+        self._camera.start_recording(video_path)
         self._recording = True
         self._frame_count = 0
         self._btn_record.setText("Stop Recording")

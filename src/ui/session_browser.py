@@ -12,6 +12,7 @@ from src.db.models import (
     get_all_participants, get_sessions_for_participant,
     flag_session, delete_session, delete_participant, get_session,
 )
+from src.db.paths import resolve_data_path
 
 
 def _remove_dir(path: Path):
@@ -29,6 +30,7 @@ class SessionBrowser(QDialog):
         self.setMinimumSize(560, 400)
         self.selected_session_id: int | None = None
         self.selected_participant_id: int | None = None
+        self.reprocess_requested = False
 
         layout = QVBoxLayout(self)
 
@@ -55,6 +57,10 @@ class SessionBrowser(QDialog):
         btn_del_session = QPushButton("Delete Session")
         btn_del_session.clicked.connect(self._delete_session)
         action_row.addWidget(btn_del_session)
+
+        btn_reextract = QPushButton("Re-extract Landmarks")
+        btn_reextract.clicked.connect(self._request_reprocess)
+        action_row.addWidget(btn_reextract)
 
         btn_compare = QPushButton("Compare All Sessions…")
         btn_compare.clicked.connect(self._open_comparison)
@@ -115,8 +121,9 @@ class SessionBrowser(QDialog):
             return
 
         # Remove session data directory (best-effort)
-        if session["video_path"]:
-            _remove_dir(Path(session["video_path"]).parent)
+        video_path = resolve_data_path(session["video_path"])
+        if video_path:
+            _remove_dir(Path(video_path).parent)
 
         delete_session(session_id)
         self._load_sessions()
@@ -139,8 +146,9 @@ class SessionBrowser(QDialog):
 
         # Remove all session data directories (best-effort)
         for s in sessions:
-            if s["video_path"]:
-                _remove_dir(Path(s["video_path"]).parent)
+            video_path = resolve_data_path(s["video_path"])
+            if video_path:
+                _remove_dir(Path(video_path).parent)
 
         delete_participant(p_id)
 
@@ -163,6 +171,16 @@ class SessionBrowser(QDialog):
         new_state = not currently_flagged
         flag_session(session_id, new_state)
         self._load_sessions()
+
+    def _request_reprocess(self):
+        item = self._session_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No Selection", "Select a session to re-extract.")
+            return
+        self.selected_session_id = item.data(256)
+        self.selected_participant_id = item.data(257)
+        self.reprocess_requested = True
+        self.accept()
 
     def _open_comparison(self):
         from src.ui.session_comparison_dialog import SessionComparisonDialog

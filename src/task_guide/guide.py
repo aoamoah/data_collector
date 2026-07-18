@@ -73,5 +73,10 @@ class TaskGuide(QObject):
                     winsound.Beep(1400, 300)
                 else:
                     winsound.Beep(1000, 150)
+            else:
+                from PySide6.QtWidgets import QApplication
+                QApplication.beep()
+                if finish:
+                    QApplication.beep()
         except Exception:
             pass

@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 import cv2
 import mediapipe as mp
@@ -8,6 +9,7 @@ from mediapipe.tasks.python import vision as mp_vision
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
+from src.processing.hand_selection import select_hand
 from src.processing.model_utils import model_path
 
 # Suppress OpenCV verbose backend probing logs
@@ -50,21 +52,25 @@ class CameraThread(QThread):
         self._fps = fps
         self._recording = False
         self._writer: cv2.VideoWriter | None = None
+        self._writer_lock = threading.Lock()
         self._running = False
         self._output_path: str = ""
-        self._dominant_hand = dominant_hand.capitalize()  # "Right" or "Left"
+        self._dominant_hand = dominant_hand  # "right" or "left"
 
-    def start_recording(self, output_path: str, fps: float, width: int, height: int):
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self._writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        self._output_path = output_path
-        self._recording = True
+    def start_recording(self, output_path: str):
+        # The writer itself is created on the camera thread once the first
+        # frame arrives, using the actual frame size the camera delivers —
+        # cap.set() resolution requests are not guaranteed to be honored.
+        with self._writer_lock:
+            self._output_path = output_path
+            self._recording = True
 
     def stop_recording(self) -> str:
-        self._recording = False
-        if self._writer:
-            self._writer.release()
-            self._writer = None
+        with self._writer_lock:
+            self._recording = False
+            if self._writer:
+                self._writer.release()
+                self._writer = None
         return self._output_path
 
     def stop(self):
@@ -112,8 +118,16 @@ class CameraThread(QThread):
                 self.error.emit("Failed to read frame")
                 break
 
-            if self._recording and self._writer:
-                self._writer.write(frame)
+            with self._writer_lock:
+                if self._recording:
+                    if self._writer is None:
+                        fh, fw = frame.shape[:2]
+                        writer_fps = cap.get(cv2.CAP_PROP_FPS) or float(self._fps)
+                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        self._writer = cv2.VideoWriter(
+                            self._output_path, fourcc, writer_fps, (fw, fh)
+                        )
+                    self._writer.write(frame)
 
             now = time.time()
             elapsed = now - prev_time
@@ -125,13 +139,12 @@ class CameraThread(QThread):
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 result = landmarker.detect(mp_image)
-                # Keep only the dominant hand when multiple hands are detected
-                filtered = [
-                    lms for lms, handedness in zip(result.hand_landmarks, result.handedness)
-                    if handedness and handedness[0].category_name == self._dominant_hand
-                ]
-                detected = bool(filtered)
-                _last_landmarks = filtered if detected else None
+                # Track only the dominant hand (mirror-corrected handedness)
+                selected = select_hand(
+                    result.hand_landmarks, result.handedness, self._dominant_hand
+                )
+                detected = selected is not None
+                _last_landmarks = [selected[0]] if selected else None
                 if detected != _last_hand_detected:
                     self.hand_presence.emit(detected)
                     _last_hand_detected = detected
@@ -160,6 +173,7 @@ class CameraThread(QThread):
         cap.release()
         if landmarker:
             landmarker.close()
-        if self._writer:
-            self._writer.release()
-            self._writer = None
+        with self._writer_lock:
+            if self._writer:
+                self._writer.release()
+                self._writer = None

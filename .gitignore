@@ -1,1 +1,7 @@
 /venv
+__pycharm__/
+__pycache__/
+*.pyc
+/data
+/data*
+/dataset
