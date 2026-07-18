@@ -55,7 +55,11 @@ class ProcessingScreen(QWidget):
         hand_row.setAlignment(Qt.AlignCenter)
         hand_row.addWidget(QLabel("Tracked hand:"))
         self._hand_combo = QComboBox()
-        self._hand_combo.addItems(["right", "left"])
+        self._hand_combo.addItems(["right", "left", "either"])
+        self._hand_combo.setToolTip(
+            "Choose 'either' when the participant switched hands mid-video —\n"
+            "the most confident hand is tracked in each frame."
+        )
         hand_row.addWidget(self._hand_combo)
         self._btn_rerun = QPushButton("Re-run Extraction")
         self._btn_rerun.clicked.connect(self._start_extraction)
