@@ -1,5 +1,6 @@
-"""Bulk import: turn a batch of video files (e.g. WITA / IPN downloads) into
-sessions — one session per video — and run landmark extraction on each."""
+"""Bulk import: turn a batch of video files or image sequences (WITA / IPN
+downloads) into sessions — one session per item — and run landmark
+extraction on each."""
 
 import shutil
 from pathlib import Path
@@ -8,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox,
     QListWidget, QPushButton, QProgressBar, QFileDialog, QMessageBox,
-    QDialogButtonBox,
+    QDialogButtonBox, QSpinBox,
 )
 
 from src.config import AppConfig
@@ -18,6 +19,9 @@ from src.db.models import (
 )
 from src.export.exporter import DATASET_FOLDERS
 from src.processing.extractor import ExtractorThread
+from src.processing.sequence_converter import (
+    SequenceConverterThread, find_sequences, list_sequence,
+)
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 VIDEO_FILTER = "Video Files (*.mp4 *.avi *.mov *.mkv *.webm)"
@@ -29,9 +33,11 @@ class BulkImportDialog(QDialog):
         self.setWindowTitle("Bulk Import Videos")
         self.setMinimumSize(560, 480)
         self._config = config
-        self._files: list[str] = []
+        # each item: {"type": "video"|"sequence", "path": str, "label": str}
+        self._items: list[dict] = []
         self._worker: ExtractorThread | None = None
-        self._queue: list[tuple[int, str]] = []   # (session_id, video_path)
+        self._converter: SequenceConverterThread | None = None
+        self._queue: list[tuple[int, dict]] = []   # (session_id, item)
         self._current = 0
         self._imported: list[int] = []
         self._errors: list[str] = []
@@ -55,12 +61,25 @@ class BulkImportDialog(QDialog):
         self._hand.setToolTip("Hand tracked during extraction. 'either' keeps "
                               "the most confident hand per frame.")
         form.addRow("Tracked hand", self._hand)
+
+        self._seq_fps = QSpinBox()
+        self._seq_fps.setRange(1, 120)
+        self._seq_fps.setValue(30)
+        self._seq_fps.setToolTip("Frame rate used when converting PNG "
+                                 "sequences to video.")
+        form.addRow("Sequence FPS", self._seq_fps)
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
         btn_add = QPushButton("Add Videos…")
         btn_add.clicked.connect(self._add_videos)
         btn_row.addWidget(btn_add)
+        btn_seq = QPushButton("Add PNG Sequences…")
+        btn_seq.setToolTip("Pick a folder of sequentially named images (one "
+                           "video), or a folder whose subfolders each hold a "
+                           "sequence (one video per subfolder).")
+        btn_seq.clicked.connect(self._add_sequences)
+        btn_row.addWidget(btn_seq)
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self._clear)
         btn_row.addWidget(btn_clear)
@@ -70,7 +89,7 @@ class BulkImportDialog(QDialog):
         self._file_list = QListWidget()
         layout.addWidget(self._file_list)
 
-        self._lbl_status = QLabel("Add videos, then press Import.")
+        self._lbl_status = QLabel("Add videos or PNG sequences, then press Import.")
         layout.addWidget(self._lbl_status)
         self._progress = QProgressBar()
         layout.addWidget(self._progress)
@@ -86,24 +105,53 @@ class BulkImportDialog(QDialog):
 
     # ---- setup ----
 
+    def _add_item(self, item: dict):
+        if any(i["path"] == item["path"] for i in self._items):
+            return
+        self._items.append(item)
+        self._file_list.addItem(item["label"])
+
     def _add_videos(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Select Videos", "", VIDEO_FILTER)
         for p in paths:
-            if p not in self._files:
-                self._files.append(p)
-                self._file_list.addItem(Path(p).name)
-        self._lbl_status.setText(f"{len(self._files)} video(s) queued.")
+            self._add_item({"type": "video", "path": p, "label": Path(p).name})
+        self._update_count()
+
+    def _add_sequences(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select PNG Sequence Folder")
+        if not folder:
+            return
+        sequences = find_sequences(folder)
+        if not sequences:
+            QMessageBox.warning(
+                self, "No Sequences",
+                "No image frames found in that folder or its subfolders.")
+            return
+        for seq in sequences:
+            n = len(list_sequence(seq))
+            self._add_item({
+                "type": "sequence", "path": str(seq),
+                "label": f"{seq.name}/  ({n} frames)",
+            })
+        self._update_count()
+
+    def _update_count(self):
+        videos = sum(1 for i in self._items if i["type"] == "video")
+        seqs = len(self._items) - videos
+        self._lbl_status.setText(
+            f"{videos} video(s) + {seqs} sequence(s) queued.")
 
     def _clear(self):
-        self._files.clear()
+        self._items.clear()
         self._file_list.clear()
-        self._lbl_status.setText("Add videos, then press Import.")
+        self._lbl_status.setText("Add videos or PNG sequences, then press Import.")
 
     # ---- import & extraction chain ----
 
     def _start(self):
-        if not self._files:
-            QMessageBox.warning(self, "No Videos", "Add at least one video file.")
+        if not self._items:
+            QMessageBox.warning(self, "Nothing Queued",
+                                "Add video files or PNG sequences first.")
             return
         if self._participant.currentIndex() < 0:
             QMessageBox.warning(self, "No Participant",
@@ -111,26 +159,20 @@ class BulkImportDialog(QDialog):
             return
 
         p_id = self._participant.currentData()
-        p_code = get_participant(p_id)["participant_code"]
+        self._p_code = get_participant(p_id)["participant_code"]
         dataset = self._dataset.currentText()
         hand = self._hand.currentText()
         dominant = hand if hand in ("right", "left") else "right"
 
         self._queue = []
-        for path in self._files:
+        for item in self._items:
             session_id = add_session(
                 p_id, lighting="normal", background="plain",
                 dominant_hand=dominant,
-                notes=f"bulk import: {Path(path).name}",
+                notes=f"bulk import: {Path(item['path']).name}",
                 dataset=dataset,
             )
-            out_dir = DATA_DIR / p_code / f"S{session_id:03d}"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            suffix = Path(path).suffix.lower() or ".mp4"
-            dest = str(out_dir / f"video{suffix}")
-            shutil.copy2(path, dest)
-            update_session(session_id, status="recorded", video_path=dest)
-            self._queue.append((session_id, dest))
+            self._queue.append((session_id, item))
 
         self._current = 0
         self._imported = []
@@ -141,20 +183,49 @@ class BulkImportDialog(QDialog):
 
     def _set_running(self, running: bool):
         self._btn_import.setEnabled(not running)
-        for combo in (self._dataset, self._participant, self._hand):
-            combo.setEnabled(not running)
+        for w in (self._dataset, self._participant, self._hand, self._seq_fps):
+            w.setEnabled(not running)
+
+    def _session_dir(self, session_id: int) -> Path:
+        out_dir = DATA_DIR / self._p_code / f"S{session_id:03d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir
 
     def _next(self):
         if self._cancelled or self._current >= len(self._queue):
             self._finish()
             return
-        session_id, video_path = self._queue[self._current]
-        name = Path(video_path).parent.name
+        session_id, item = self._queue[self._current]
+        pos = f"{self._current + 1}/{len(self._queue)}"
+        out_dir = self._session_dir(session_id)
+
+        if item["type"] == "sequence":
+            self._lbl_status.setText(f"Converting {pos} ({item['label']})…")
+            dest = str(out_dir / "video.mp4")
+            self._converter = SequenceConverterThread(
+                item["path"], dest, float(self._seq_fps.value()))
+            self._converter.progress.connect(self._on_progress)
+            self._converter.finished.connect(
+                lambda path, sid=session_id: self._on_converted(sid, path))
+            self._converter.error.connect(
+                lambda msg, sid=session_id: self._on_one_error(sid, msg))
+            self._converter.start()
+        else:
+            src = item["path"]
+            suffix = Path(src).suffix.lower() or ".mp4"
+            dest = str(out_dir / f"video{suffix}")
+            shutil.copy2(src, dest)
+            self._begin_extraction(session_id, dest)
+
+    def _on_converted(self, session_id: int, video_path: str):
+        self._begin_extraction(session_id, video_path)
+
+    def _begin_extraction(self, session_id: int, video_path: str):
+        update_session(session_id, status="recorded", video_path=video_path)
+        pos = f"{self._current + 1}/{len(self._queue)}"
         self._lbl_status.setText(
-            f"Extracting {self._current + 1}/{len(self._queue)} ({name})…"
-        )
-        p_code = Path(video_path).parent.parent.name
-        out_csv = str(DATA_DIR / p_code / f"S{session_id:03d}" / "landmarks.csv")
+            f"Extracting {pos} (S{session_id:03d})…")
+        out_csv = str(self._session_dir(session_id) / "landmarks.csv")
         self._worker = ExtractorThread(
             video_path, out_csv,
             confidence_threshold=self._config.confidence_threshold,
@@ -198,8 +269,10 @@ class BulkImportDialog(QDialog):
         self._clear()
 
     def _on_close(self):
-        if self._worker and self._worker.isRunning():
+        busy = (self._worker and self._worker.isRunning()) or (
+            self._converter and self._converter.isRunning())
+        if busy:
             self._cancelled = True
-            self._lbl_status.setText("Finishing current video, then stopping…")
+            self._lbl_status.setText("Finishing current item, then stopping…")
             return
         self.reject()
