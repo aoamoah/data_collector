@@ -1,10 +1,11 @@
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QDialogButtonBox,
-    QVBoxLayout, QLabel, QTextEdit, QPushButton,
+    QVBoxLayout, QLabel, QTextEdit, QPushButton, QMessageBox,
 )
 
 from src.config import AppConfig, DEFAULT_TASK_DURATIONS
 from src.db.models import add_session
+from src.export.exporter import is_valid_dataset_name, known_datasets
 from src.ui.task_duration_editor import TaskDurationEditor
 
 
@@ -23,10 +24,12 @@ class SessionForm(QDialog):
 
         form = QFormLayout()
         self._dataset = QComboBox()
-        self._dataset.addItems(["dataset", "dataset_WITA", "dataset_IPN"])
+        self._dataset.setEditable(True)
+        self._dataset.addItems(known_datasets())
         self._dataset.setToolTip(
             "Which collection this session belongs to — determines the folder "
-            "the exported files go into."
+            "the exported files go into. Type a new name (dataset_<Source>) "
+            "for a new source."
         )
         self._lighting = QComboBox()
         self._lighting.addItems(["bright", "normal", "dim"])
@@ -63,12 +66,19 @@ class SessionForm(QDialog):
             self._config.task_durations = self._task_durations
 
     def _save(self):
+        dataset = self._dataset.currentText().strip()
+        if not is_valid_dataset_name(dataset):
+            QMessageBox.warning(
+                self, "Dataset name",
+                "Dataset names must be 'dataset' or 'dataset_<Source>' using "
+                "letters, digits and hyphens, e.g. dataset_MySource.")
+            return
         self.session_id = add_session(
             self._participant_id,
             self._lighting.currentText(),
             self._background.currentText(),
             self._dominant_hand.currentText(),
             notes=self._notes.toPlainText().strip(),
-            dataset=self._dataset.currentText(),
+            dataset=dataset,
         )
         self.accept()

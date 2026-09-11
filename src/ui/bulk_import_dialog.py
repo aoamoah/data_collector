@@ -17,8 +17,9 @@ from src.db.models import (
     get_all_participants, get_participant, add_session, update_session,
     save_quality_report,
 )
-from src.export.exporter import DATASET_FOLDERS
+from src.export.exporter import is_valid_dataset_name, known_datasets
 from src.processing.extractor import ExtractorThread
+from src.processing.video_io import proxy_path_for
 from src.processing.sequence_converter import (
     SequenceConverterThread, find_sequences, list_sequence,
 )
@@ -47,7 +48,10 @@ class BulkImportDialog(QDialog):
 
         form = QFormLayout()
         self._dataset = QComboBox()
-        self._dataset.addItems(DATASET_FOLDERS)
+        self._dataset.setEditable(True)
+        self._dataset.addItems(known_datasets())
+        self._dataset.setToolTip("Pick a collection or type a new one, e.g. "
+                                 "dataset_MySource — it becomes the export folder.")
         form.addRow("Dataset", self._dataset)
 
         self._participant = QComboBox()
@@ -158,9 +162,15 @@ class BulkImportDialog(QDialog):
                                 "Create a participant first (Home → New Participant).")
             return
 
+        dataset = self._dataset.currentText().strip()
+        if not is_valid_dataset_name(dataset):
+            QMessageBox.warning(
+                self, "Dataset name",
+                "Dataset names must be 'dataset' or 'dataset_<Source>' using "
+                "letters, digits and hyphens, e.g. dataset_MySource.")
+            return
         p_id = self._participant.currentData()
         self._p_code = get_participant(p_id)["participant_code"]
-        dataset = self._dataset.currentText()
         hand = self._hand.currentText()
         dominant = hand if hand in ("right", "left") else "right"
 
@@ -171,6 +181,7 @@ class BulkImportDialog(QDialog):
                 dominant_hand=dominant,
                 notes=f"bulk import: {Path(item['path']).name}",
                 dataset=dataset,
+                source_path=item["path"],
             )
             self._queue.append((session_id, item))
 
@@ -230,6 +241,7 @@ class BulkImportDialog(QDialog):
             video_path, out_csv,
             confidence_threshold=self._config.confidence_threshold,
             target_hand=self._hand.currentText(),
+            proxy_path=str(proxy_path_for(out_csv)),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.quality_ready.connect(

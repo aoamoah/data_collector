@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from src.config import AppConfig
 from src.processing.extractor import ExtractorThread
+from src.processing.video_io import proxy_path_for
 from src.ui.quality_report_dialog import QualityReportDialog
 from src.db.models import get_session, get_participant, update_session, save_quality_report
 from src.db.paths import resolve_data_path
@@ -111,6 +112,7 @@ class ProcessingScreen(QWidget):
             video_path, out_csv,
             confidence_threshold=self._config.confidence_threshold,
             target_hand=self._hand_combo.currentText(),
+            proxy_path=str(proxy_path_for(out_csv)),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.quality_ready.connect(self._on_quality_ready)

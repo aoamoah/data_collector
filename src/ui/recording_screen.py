@@ -12,6 +12,7 @@ from src.capture.camera import CameraThread, find_available_camera
 from src.config import AppConfig
 from src.task_guide.guide import TaskGuide, TASK_STEPS
 from src.db.models import update_session, get_participant, get_session
+from src.processing.video_io import capture_timestamps_path_for
 
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
@@ -257,8 +258,14 @@ class RecordingScreen(QWidget):
         dest = str(out_dir / f"video{suffix}")
         if path != dest:
             shutil.copy2(path, dest)
+        # A capture log left by an earlier recording in this session belongs
+        # to that recording, not to the file just loaded
+        stale_log = capture_timestamps_path_for(dest)
+        if path != dest and stale_log.exists():
+            stale_log.unlink()
 
-        update_session(self._session_id, status="recorded", video_path=dest)
+        update_session(self._session_id, status="recorded", video_path=dest,
+                       source_path=path)
         self.recording_done.emit(self._session_id)
 
     def _start_guide(self):

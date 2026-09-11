@@ -106,14 +106,28 @@ Responsibilities:
 
 Output:
 - `landmarks.csv`
+- `annotation_proxy.mp4` — every decoded frame, re-encoded (≤960 px). Frame N
+  of the proxy is row N of landmarks.csv, and it seeks exactly. OpenCV seeking
+  on the source is not frame-exact on every container (IPN `.avi`: up to 14
+  frames off), so the annotation screen always shows the proxy. Viewing aid
+  only — never exported.
+- The extraction report (DB `quality_report`): detection stats plus `video`
+  (resolution, fps, header vs decoded frames), `timing` (source, repairs,
+  measured fps) and `extraction` (MediaPipe version, model hash, running mode,
+  thresholds, target hand, handedness counts).
 
 Structure:
 - frame_index
-- timestamp_ms
+- timestamp_ms — real capture time when the recorder logged one
+  (`capture_timestamps.csv`), else the container clock; always strictly
+  increasing (a stalled clock is advanced one frame, not skipped)
 - hand_detected
 - detection_confidence
 - tracking_confidence
-- l0_x, l0_y, l0_z ... l20_z
+- l0_x, l0_y, l0_z ... l20_z — image landmarks (x, y as fractions of width, height)
+- handedness — MediaPipe Left/Right for the tracked hand
+- wl0_x ... wl20_z — world landmarks, metres, hand-centred: independent of
+  resolution and aspect ratio
 
 ---
 
@@ -130,13 +144,13 @@ Features:
 
 Labels:
 - writing
-- not_writing
+- not_writing — includes pauses inside a letter or word
+- unsure — cannot be judged (blur, occlusion); excluded from training and scoring
 
-Optional internal states:
-- rest
-- prepare
-- pause
-- gesture
+The newest annotation overwrites whatever it overlaps, so a short pause can
+be marked inside a longer writing range. The label timeline under the video
+shows every frame's label; playback runs at 0.25×–2× for placing short-pause
+boundaries. Unlabelled frames are saved as not_writing after a warning.
 
 ---
 
@@ -185,6 +199,8 @@ counter.
 - notes
 - flagged
 - quality_report (JSON, written after extraction)
+- dataset (export folder)
+- source_path (file the video was imported from)
 
 Schema changes are applied via `src/db/migrations.py` using `PRAGMA user_version`.
 
@@ -216,17 +232,39 @@ exports.
 frame_index,label
 ```
 
-### metadata.json
+One row per landmarks.csv row. `label` is writing, not_writing or unsure.
+
+### metadata.json (schema_version 2)
 
 ```json
 {
+  "schema_version": 2,
   "participant_id": "P001",
   "session_id": "S001",
+  "dataset": "dataset",
+  "source_file": null,
   "lighting": "bright",
   "background": "plain",
-  "dominant_hand": "right"
+  "dominant_hand": "right",
+  "video": {"width": 640, "height": 480, "fps": 30.0, "aspect": 1.333333,
+            "header_frames": 1083, "decoded_frames": 1083, "fourcc": "FMP4"},
+  "timing": {"source": "capture_log", "timestamp_repairs": 0, "measured_fps": 29.97},
+  "extraction": {"mediapipe_version": "0.10.35", "running_mode": "VIDEO", "...": "..."},
+  "detection": {"pct_detected": 81.9, "...": "..."},
+  "landmark_columns": {"image": "...", "world": "...", "handedness": "...", "rows": 1083},
+  "labels": {"set": ["writing", "not_writing", "unsure"],
+             "excluded_from_training": ["unsure"], "counts": {"...": 0}}
 }
 ```
+
+The trainer reads the resolution from here; `scan_resolutions.py` is only
+needed for exports made before schema_version 2.
+
+### Datasets
+
+Each session belongs to a dataset, which is its export folder: `dataset`
+(own recordings) or `dataset_<Source>` for an external source. New names can
+be typed in the New Session and Bulk Import forms (letters, digits, hyphens).
 
 ---
 

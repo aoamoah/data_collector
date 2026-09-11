@@ -29,3 +29,11 @@ def run_migrations(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE sessions ADD COLUMN dataset TEXT DEFAULT 'dataset'")
         conn.commit()
         _set_schema_version(conn, 3)
+
+    if version < 4:
+        # The file a session's video was imported from. With several external
+        # sources, provenance has to survive into the export — the session
+        # notes were the only record of it
+        conn.execute("ALTER TABLE sessions ADD COLUMN source_path TEXT DEFAULT NULL")
+        conn.commit()
+        _set_schema_version(conn, 4)

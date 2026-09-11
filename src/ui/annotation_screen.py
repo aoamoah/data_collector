@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QSizePolicy, QCheckBox,
 )
 
-from src.annotation.annotator import AnnotationStore, LABELS
+from src.annotation.annotator import AnnotationStore, LABELS, DEFAULT_LABEL
 from src.annotation.commands import AddAnnotationCommand, RemoveAnnotationCommand, BulkLabelCommand
 from src.db.models import (
     get_session, get_participant, get_annotations_for_session,
@@ -19,9 +19,12 @@ from src.db.models import (
 )
 from src.db.paths import resolve_data_path
 from src.export.exporter import export_session, validate_export
+from src.processing.video_io import proxy_path_for
+from src.ui.label_timeline import LabelTimeline
 
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
+PLAYBACK_SPEEDS = [("0.25×", 0.25), ("0.5×", 0.5), ("1×", 1.0), ("2×", 2.0)]
 
 # MediaPipe hand skeleton connections (21 landmarks)
 HAND_CONNECTIONS = [
@@ -52,6 +55,7 @@ class AnnotationScreen(QWidget):
         self._play_timer.timeout.connect(self._advance_frame)
         # Landmark data: {frame_index: [(x, y, z), ...] or None}
         self._landmarks: dict[int, list | None] = {}
+        self._landmark_rows = 0
         self._build_ui()
         self._setup_shortcuts()
 
@@ -72,12 +76,31 @@ class AnnotationScreen(QWidget):
         self._slider.valueChanged.connect(self._on_slider)
         root.addWidget(self._slider)
 
+        self._timeline = LabelTimeline()
+        self._timeline.seek_requested.connect(self._on_timeline_seek)
+        root.addWidget(self._timeline)
+
+        # Says whether the frame on screen is guaranteed to be the frame the
+        # landmarks and labels refer to
+        self._lbl_source = QLabel("")
+        self._lbl_source.setWordWrap(True)
+        root.addWidget(self._lbl_source)
+
         # Playback controls row
         ctrl = QHBoxLayout()
         self._btn_play = QPushButton("Play")
         self._btn_play.setFixedWidth(80)
         self._btn_play.clicked.connect(self._toggle_play)
         ctrl.addWidget(self._btn_play)
+
+        self._speed_combo = QComboBox()
+        for text, speed in PLAYBACK_SPEEDS:
+            self._speed_combo.addItem(text, speed)
+        self._speed_combo.setCurrentIndex(2)
+        self._speed_combo.setToolTip("Playback speed — slow down to place the "
+                                     "boundaries of short pauses")
+        self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        ctrl.addWidget(self._speed_combo)
 
         self._lbl_frame = QLabel("Frame: 0 / 0")
         ctrl.addWidget(self._lbl_frame)
@@ -171,6 +194,7 @@ class AnnotationScreen(QWidget):
         QShortcut(QKeySequence("A"), self).activated.connect(self._add_annotation)
         QShortcut(QKeySequence("W"), self).activated.connect(self._label_writing)
         QShortcut(QKeySequence("N"), self).activated.connect(self._label_not_writing)
+        QShortcut(QKeySequence("U"), self).activated.connect(self._label_unsure)
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self._redo)
 
@@ -180,6 +204,9 @@ class AnnotationScreen(QWidget):
     def _label_not_writing(self):
         self._label_combo.setCurrentText("not_writing")
 
+    def _label_unsure(self):
+        self._label_combo.setCurrentText("unsure")
+
     def _step_frame(self, delta: int):
         target = max(0, min(self._total_frames - 1, self._current_frame + delta))
         self._show_frame(target)
@@ -188,7 +215,7 @@ class AnnotationScreen(QWidget):
         self._session_id = session_id
         self._start_mark = None
         self._end_mark = None
-        self._lbl_mark.setText("Start: — End: —")
+        self._update_mark_label()
         self._landmarks = {}
 
         session = get_session(session_id)
@@ -197,23 +224,43 @@ class AnnotationScreen(QWidget):
             QMessageBox.critical(self, "Error", "Video file not found.")
             return
 
+        # Landmarks first: their row count is the frame count every label
+        # must line up with
+        landmarks_path = resolve_data_path(session["landmarks_path"])
+        self._landmark_rows = 0
+        if landmarks_path:
+            self._load_landmarks(landmarks_path)
+
+        # Prefer the frame-exact proxy the extractor wrote (see video_io);
+        # seeking the original is not reliable on every container
+        proxy = proxy_path_for(landmarks_path)
+        use_proxy = proxy is not None and proxy.exists()
         if self._cap:
             self._cap.release()
-        self._cap = cv2.VideoCapture(video_path)
-        self._total_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._cap = cv2.VideoCapture(str(proxy) if use_proxy else video_path)
+        video_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._total_frames = self._landmark_rows or video_frames
+        if use_proxy and video_frames == self._landmark_rows:
+            self._lbl_source.setText("Frame-exact: showing the annotation proxy, "
+                                     "frame N here is row N of landmarks.csv.")
+            self._lbl_source.setStyleSheet("color: #2e9d5b;")
+        else:
+            reason = ("no annotation proxy — re-extract landmarks to build one"
+                      if not use_proxy else
+                      f"proxy has {video_frames} frames, landmarks {self._landmark_rows}"
+                      " — re-extract landmarks")
+            self._lbl_source.setText(
+                f"Seeking may be inexact ({reason}). On some containers the frame "
+                "shown can lag the frame index by several frames.")
+            self._lbl_source.setStyleSheet("color: #d9822b;")
         self._slider.setMaximum(max(0, self._total_frames - 1))
         self._current_frame = 0
-        self._show_frame(0)
 
         rows = get_annotations_for_session(session_id)
         self._store.load(rows)
         self._refresh_ann_list()
         self._update_undo_redo_buttons()
-
-        # Load landmarks if available
-        landmarks_path = resolve_data_path(session["landmarks_path"])
-        if landmarks_path:
-            self._load_landmarks(landmarks_path)
+        self._show_frame(0)
 
     def _load_landmarks(self, path: str):
         self._landmarks = {}
@@ -221,6 +268,7 @@ class AnnotationScreen(QWidget):
             with open(path, newline="") as f:
                 for row in csv.DictReader(f):
                     fi = int(row["frame_index"])
+                    self._landmark_rows = max(self._landmark_rows, fi + 1)
                     if row["hand_detected"] in ("True", "1", "true"):
                         pts = [
                             (float(row[f"l{i}_x"]), float(row[f"l{i}_y"]), float(row[f"l{i}_z"]))
@@ -231,6 +279,7 @@ class AnnotationScreen(QWidget):
                         self._landmarks[fi] = None
         except Exception:
             self._landmarks = {}
+            self._landmark_rows = 0
 
     def _show_frame(self, index: int):
         if not self._cap:
@@ -262,14 +311,29 @@ class AnnotationScreen(QWidget):
             Qt.KeepAspectRatio, Qt.SmoothTransformation,
         )
         self._video_label.setPixmap(pixmap)
-        self._lbl_frame.setText(f"Frame: {index} / {self._total_frames - 1}")
+        label = self._store.label_at(index) or "unlabelled"
+        self._lbl_frame.setText(f"Frame: {index} / {self._total_frames - 1}  ·  {label}")
         self._slider.blockSignals(True)
         self._slider.setValue(index)
         self._slider.blockSignals(False)
+        self._timeline.set_position(index)
 
     def _on_slider(self, value: int):
         if not self._playing:
             self._show_frame(value)
+
+    def _on_timeline_seek(self, frame: int):
+        if self._playing:
+            self._toggle_play()
+        self._show_frame(frame)
+
+    def _playback_interval(self) -> int:
+        fps = (self._cap.get(cv2.CAP_PROP_FPS) if self._cap else 0) or 30
+        return max(1, int(1000 / (fps * self._speed_combo.currentData())))
+
+    def _on_speed_changed(self, _index: int):
+        if self._playing:
+            self._play_timer.start(self._playback_interval())
 
     def _toggle_play(self):
         if self._playing:
@@ -277,9 +341,7 @@ class AnnotationScreen(QWidget):
             self._playing = False
             self._btn_play.setText("Play")
         else:
-            fps = self._cap.get(cv2.CAP_PROP_FPS) if self._cap else 30
-            interval = max(1, int(1000 / fps))
-            self._play_timer.start(interval)
+            self._play_timer.start(self._playback_interval())
             self._playing = True
             self._btn_play.setText("Pause")
 
@@ -292,6 +354,7 @@ class AnnotationScreen(QWidget):
 
     def _mark_start(self):
         self._start_mark = self._current_frame
+        self._end_mark = None
         self._update_mark_label()
 
     def _mark_end(self):
@@ -309,6 +372,7 @@ class AnnotationScreen(QWidget):
         start = self._start_mark if self._start_mark is not None else "—"
         end = self._end_mark if self._end_mark is not None else "—"
         self._lbl_mark.setText(f"Start: {start}  End: {end}")
+        self._timeline.set_marks(self._start_mark, self._end_mark)
 
     def _add_annotation(self):
         if self._start_mark is None or self._end_mark is None:
@@ -319,7 +383,7 @@ class AnnotationScreen(QWidget):
         self._store.apply_command(cmd)
         self._start_mark = None
         self._end_mark = None
-        self._lbl_mark.setText("Start: — End: —")
+        self._update_mark_label()
         self._refresh_ann_list()
         self._update_undo_redo_buttons()
 
@@ -358,7 +422,9 @@ class AnnotationScreen(QWidget):
         for ann in self._store.get_all():
             self._ann_list.addItem(
                 f"[{ann.start_frame} – {ann.end_frame}]  {ann.label}"
+                f"  ({ann.end_frame - ann.start_frame + 1} fr)"
             )
+        self._timeline.set_labels(self._store.frame_labels(self._total_frames))
 
     def _save_labels(self):
         if not self._session_id:
@@ -367,6 +433,17 @@ class AnnotationScreen(QWidget):
         participant = get_participant(session["participant_id"])
         p_code = participant["participant_code"]
         labels_path = str(DATA_DIR / p_code / f"S{self._session_id:03d}" / "labels.csv")
+
+        uncovered = sum(e - s + 1 for s, e in self._store.uncovered_runs(self._total_frames))
+        if uncovered:
+            reply = QMessageBox.question(
+                self, "Unlabelled frames",
+                f"{uncovered} of {self._total_frames} frames have no label and will "
+                f"be saved as {DEFAULT_LABEL}.\n\nSave anyway? (Use 'Fill Gaps' to "
+                "make that explicit, or label them first.)",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
 
         # Sync annotations to DB (delete all, re-insert from store)
         delete_annotations_for_session(self._session_id)

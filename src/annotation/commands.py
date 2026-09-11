@@ -15,19 +15,28 @@ class LabelCommand(ABC):
 
 
 class AddAnnotationCommand(LabelCommand):
+    """Adding can trim or split the annotations it overlaps, so undo restores
+    the whole list as it was rather than just removing the new range."""
+
     def __init__(self, store: AnnotationStore, start: int, end: int, label: str):
         self._store = store
         self._start = start
         self._end = end
         self._label = label
-        self._annotation: Annotation | None = None
+        self._before: list[Annotation] | None = None
+        self._after: list[Annotation] | None = None
 
     def execute(self):
-        self._annotation = self._store._add(self._start, self._end, self._label)
+        self._before = list(self._store._annotations)
+        if self._after is None:
+            self._store._add(self._start, self._end, self._label)
+            self._after = list(self._store._annotations)
+        else:
+            self._store._annotations = list(self._after)
 
     def undo(self):
-        if self._annotation and self._annotation in self._store._annotations:
-            self._store._annotations.remove(self._annotation)
+        if self._before is not None:
+            self._store._annotations = list(self._before)
 
 
 class RemoveAnnotationCommand(LabelCommand):

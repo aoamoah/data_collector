@@ -11,6 +11,7 @@ from PySide6.QtGui import QImage
 
 from src.processing.hand_selection import select_hand
 from src.processing.model_utils import model_path
+from src.processing.video_io import capture_timestamps_path_for, save_capture_timestamps
 
 # Suppress OpenCV verbose backend probing logs
 os.environ.setdefault("OPENCV_LOG_LEVEL", "OFF")
@@ -55,6 +56,10 @@ class CameraThread(QThread):
         self._writer_lock = threading.Lock()
         self._running = False
         self._output_path: str = ""
+        # Wall-clock time of every written frame, relative to the first. The
+        # writer stamps frames at the nominal fps, so a camera that delivers
+        # 20 fps in dim light would otherwise be timed as if it ran at 30
+        self._capture_times: list[float] = []
         self._dominant_hand = dominant_hand  # "right" or "left"
 
     def start_recording(self, output_path: str):
@@ -63,6 +68,7 @@ class CameraThread(QThread):
         # cap.set() resolution requests are not guaranteed to be honored.
         with self._writer_lock:
             self._output_path = output_path
+            self._capture_times = []
             self._recording = True
 
     def stop_recording(self) -> str:
@@ -71,6 +77,9 @@ class CameraThread(QThread):
             if self._writer:
                 self._writer.release()
                 self._writer = None
+            if self._output_path and self._capture_times:
+                save_capture_timestamps(
+                    capture_timestamps_path_for(self._output_path), self._capture_times)
         return self._output_path
 
     def stop(self):
@@ -117,6 +126,7 @@ class CameraThread(QThread):
             if not ret:
                 self.error.emit("Failed to read frame")
                 break
+            read_ms = time.monotonic() * 1000.0
 
             with self._writer_lock:
                 if self._recording:
@@ -128,6 +138,9 @@ class CameraThread(QThread):
                             self._output_path, fourcc, writer_fps, (fw, fh)
                         )
                     self._writer.write(frame)
+                    if not self._capture_times:
+                        self._t0_ms = read_ms
+                    self._capture_times.append(read_ms - self._t0_ms)
 
             now = time.time()
             elapsed = now - prev_time
