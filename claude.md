@@ -152,6 +152,13 @@ be marked inside a longer writing range. The label timeline under the video
 shows every frame's label; playback runs at 0.25×–2× for placing short-pause
 boundaries. Unlabelled frames are saved as not_writing after a warning.
 
+A labelling guide sits beside the video (F1 toggles it), and the rule for the
+selected label shows under the controls. Its text lives in
+`src/annotation/labelling_guide.py`. The rule is "fingertip as a pen on paper":
+pen-down is writing; pauses and moves between strokes or letters are
+not_writing. Change it only there, and before annotating, because sources
+annotated under different rules can't be pooled.
+
 ---
 
 ### 5. Export Module

@@ -80,3 +80,12 @@ def test_save_to_csv_writes_every_frame(tmp_path):
     assert [r["label"] for r in rows] == [
         "not_writing", "not_writing", "writing", "writing", "unsure", "not_writing"]
     assert [int(r["frame_index"]) for r in rows] == list(range(6))
+
+
+def test_every_label_has_a_guide_rule():
+    from src.annotation.annotator import LABELS
+    from src.annotation.labelling_guide import LABEL_RULES, guide_html
+
+    assert set(LABEL_RULES) == set(LABELS)
+    html = guide_html({label: "#000000" for label in LABELS})
+    assert all(label in html for label in LABELS)

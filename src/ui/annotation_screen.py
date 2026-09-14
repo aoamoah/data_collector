@@ -8,11 +8,12 @@ from PySide6.QtGui import QImage, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QSlider, QComboBox, QListWidget, QListWidgetItem,
-    QMessageBox, QSizePolicy, QCheckBox,
+    QMessageBox, QSizePolicy, QCheckBox, QSplitter, QTextBrowser,
 )
 
 from src.annotation.annotator import AnnotationStore, LABELS, DEFAULT_LABEL
 from src.annotation.commands import AddAnnotationCommand, RemoveAnnotationCommand, BulkLabelCommand
+from src.annotation.labelling_guide import LABEL_RULES, guide_html
 from src.db.models import (
     get_session, get_participant, get_annotations_for_session,
     add_annotation, delete_annotations_for_session, update_session,
@@ -20,8 +21,11 @@ from src.db.models import (
 from src.db.paths import resolve_data_path
 from src.export.exporter import export_session, validate_export
 from src.processing.video_io import proxy_path_for
-from src.ui.label_timeline import LabelTimeline
+from src.ui.label_timeline import LabelTimeline, LABEL_COLORS
 
+
+# Hex colour of each label as drawn on the timeline; None is unlabelled
+LABEL_HEX = {label: color.name() for label, color in LABEL_COLORS.items()}
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 PLAYBACK_SPEEDS = [("0.25×", 0.25), ("0.5×", 0.5), ("1×", 1.0), ("2×", 2.0)]
@@ -62,29 +66,52 @@ class AnnotationScreen(QWidget):
     def _build_ui(self):
         root = QVBoxLayout(self)
 
+        # Video column on the left, labelling guide on the right
+        splitter = QSplitter(Qt.Horizontal)
+        video_col = QWidget()
+        video_layout = QVBoxLayout(video_col)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+
         # Video display
         self._video_label = QLabel()
         self._video_label.setAlignment(Qt.AlignCenter)
-        self._video_label.setMinimumSize(640, 360)
+        self._video_label.setMinimumSize(480, 360)
         self._video_label.setStyleSheet("background: #111;")
         self._video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        root.addWidget(self._video_label)
+        video_layout.addWidget(self._video_label)
 
         # Slider
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setMinimum(0)
         self._slider.valueChanged.connect(self._on_slider)
-        root.addWidget(self._slider)
+        video_layout.addWidget(self._slider)
 
         self._timeline = LabelTimeline()
         self._timeline.seek_requested.connect(self._on_timeline_seek)
-        root.addWidget(self._timeline)
+        video_layout.addWidget(self._timeline)
+
+        swatches = [(LABEL_HEX[label], label) for label in LABELS]
+        swatches += [(LABEL_HEX[None], "unlabelled"), ("#4da3ff", "marked range")]
+        legend = QLabel("   ".join(
+            f'<span style="color:{color}; font-size:14px;">■</span> {name}'
+            for color, name in swatches))
+        video_layout.addWidget(legend)
 
         # Says whether the frame on screen is guaranteed to be the frame the
         # landmarks and labels refer to
         self._lbl_source = QLabel("")
         self._lbl_source.setWordWrap(True)
-        root.addWidget(self._lbl_source)
+        video_layout.addWidget(self._lbl_source)
+        splitter.addWidget(video_col)
+
+        self._guide = QTextBrowser()
+        self._guide.setHtml(guide_html(LABEL_HEX))
+        self._guide.setMinimumWidth(260)
+        splitter.addWidget(self._guide)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setCollapsible(0, False)
+        root.addWidget(splitter, 1)
 
         # Playback controls row
         ctrl = QHBoxLayout()
@@ -109,6 +136,13 @@ class AnnotationScreen(QWidget):
         self._chk_landmarks.setChecked(True)
         ctrl.addWidget(self._chk_landmarks)
 
+        self._btn_guide = QPushButton("Guide [F1]")
+        self._btn_guide.setCheckable(True)
+        self._btn_guide.setChecked(True)
+        self._btn_guide.setToolTip("Show or hide the labelling guide")
+        self._btn_guide.toggled.connect(self._guide.setVisible)
+        ctrl.addWidget(self._btn_guide)
+
         ctrl.addStretch()
 
         self._btn_mark_start = QPushButton("Mark Start [S]")
@@ -116,6 +150,9 @@ class AnnotationScreen(QWidget):
         self._lbl_mark = QLabel("Start: — End: —")
         self._label_combo = QComboBox()
         self._label_combo.addItems(LABELS)
+        for i, label in enumerate(LABELS):
+            self._label_combo.setItemData(i, LABEL_RULES[label], Qt.ToolTipRole)
+        self._label_combo.currentTextChanged.connect(self._update_label_hint)
         self._btn_add = QPushButton("Add [A]")
         self._btn_add.clicked.connect(self._add_annotation)
 
@@ -126,6 +163,13 @@ class AnnotationScreen(QWidget):
         self._btn_mark_start.clicked.connect(self._mark_start)
         self._btn_mark_end.clicked.connect(self._mark_end)
         root.addLayout(ctrl)
+
+        # What the label about to be added means, so the rule is in view at
+        # the moment of choosing it
+        self._lbl_hint = QLabel()
+        self._lbl_hint.setWordWrap(True)
+        root.addWidget(self._lbl_hint)
+        self._update_label_hint(self._label_combo.currentText())
 
         # Annotation list + action buttons
         bottom = QHBoxLayout()
@@ -197,6 +241,12 @@ class AnnotationScreen(QWidget):
         QShortcut(QKeySequence("U"), self).activated.connect(self._label_unsure)
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self._redo)
+        QShortcut(QKeySequence("F1"), self).activated.connect(self._btn_guide.toggle)
+
+    def _update_label_hint(self, label: str):
+        self._lbl_hint.setText(
+            f'Adding as <b style="color:{LABEL_HEX[label]};">{label}</b>: '
+            f"{LABEL_RULES[label]}")
 
     def _label_writing(self):
         self._label_combo.setCurrentText("writing")
@@ -311,8 +361,11 @@ class AnnotationScreen(QWidget):
             Qt.KeepAspectRatio, Qt.SmoothTransformation,
         )
         self._video_label.setPixmap(pixmap)
-        label = self._store.label_at(index) or "unlabelled"
-        self._lbl_frame.setText(f"Frame: {index} / {self._total_frames - 1}  ·  {label}")
+        label = self._store.label_at(index)
+        self._lbl_frame.setText(
+            f"Frame: {index} / {self._total_frames - 1}  ·  "
+            f'<b style="color:{LABEL_HEX.get(label, LABEL_HEX[None])};">'
+            f"{label or 'unlabelled'}</b>")
         self._slider.blockSignals(True)
         self._slider.setValue(index)
         self._slider.blockSignals(False)
