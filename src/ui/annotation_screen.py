@@ -15,7 +15,7 @@ from src.annotation.annotator import AnnotationStore, LABELS, DEFAULT_LABEL
 from src.annotation.commands import AddAnnotationCommand, RemoveAnnotationCommand, BulkLabelCommand
 from src.annotation.labelling_guide import LABEL_RULES, guide_html
 from src.db.models import (
-    get_session, get_participant, get_annotations_for_session,
+    get_session, get_participant, get_annotations_for_session, get_all_sessions,
     add_annotation, delete_annotations_for_session, update_session,
 )
 from src.db.paths import resolve_data_path
@@ -28,6 +28,8 @@ from src.ui.label_timeline import LabelTimeline, LABEL_COLORS
 LABEL_HEX = {label: color.name() for label, color in LABEL_COLORS.items()}
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
+# Sessions with landmarks, i.e. the ones this screen can open
+ANNOTATABLE_STATUSES = ("processed", "annotated", "exported")
 PLAYBACK_SPEEDS = [("0.25×", 0.25), ("0.5×", 0.5), ("1×", 1.0), ("2×", 2.0)]
 
 # MediaPipe hand skeleton connections (21 landmarks)
@@ -60,11 +62,39 @@ class AnnotationScreen(QWidget):
         # Landmark data: {frame_index: [(x, y, z), ...] or None}
         self._landmarks: dict[int, list | None] = {}
         self._landmark_rows = 0
+        # Annotations as last loaded or saved, to tell whether leaving the
+        # session would lose work
+        self._saved_snapshot: list[tuple] = []
+        # Every annotatable session in navigation order (participant, then id)
+        self._nav_sessions: list = []
         self._build_ui()
         self._setup_shortcuts()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
+
+        # Session bar: move to another session without going back to Home
+        nav = QHBoxLayout()
+        self._btn_prev_session = QPushButton("◀ Prev Session [PgUp]")
+        self._btn_prev_session.clicked.connect(lambda: self._step_session(-1))
+        nav.addWidget(self._btn_prev_session)
+        nav.addWidget(QLabel("Participant:"))
+        self._nav_participant = QComboBox()
+        self._nav_participant.setMinimumWidth(160)
+        self._nav_participant.activated.connect(self._on_nav_participant)
+        nav.addWidget(self._nav_participant)
+        nav.addWidget(QLabel("Session:"))
+        self._nav_session = QComboBox()
+        self._nav_session.setMinimumWidth(160)
+        self._nav_session.activated.connect(self._on_nav_session)
+        nav.addWidget(self._nav_session)
+        self._btn_next_session = QPushButton("Next Session [PgDown] ▶")
+        self._btn_next_session.clicked.connect(lambda: self._step_session(1))
+        nav.addWidget(self._btn_next_session)
+        self._lbl_nav_pos = QLabel("")
+        nav.addWidget(self._lbl_nav_pos)
+        nav.addStretch()
+        root.addLayout(nav)
 
         # Video column on the left, labelling guide on the right
         splitter = QSplitter(Qt.Horizontal)
@@ -242,6 +272,8 @@ class AnnotationScreen(QWidget):
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self._redo)
         QShortcut(QKeySequence("F1"), self).activated.connect(self._btn_guide.toggle)
+        QShortcut(QKeySequence("PgUp"), self).activated.connect(lambda: self._step_session(-1))
+        QShortcut(QKeySequence("PgDown"), self).activated.connect(lambda: self._step_session(1))
 
     def _update_label_hint(self, label: str):
         self._lbl_hint.setText(
@@ -261,12 +293,104 @@ class AnnotationScreen(QWidget):
         target = max(0, min(self._total_frames - 1, self._current_frame + delta))
         self._show_frame(target)
 
+    # ---------- Session navigation ----------
+
+    def _snapshot(self) -> list[tuple]:
+        return [(a.start_frame, a.end_frame, a.label) for a in self._store.get_all()]
+
+    def has_unsaved_changes(self) -> bool:
+        return self._session_id is not None and self._snapshot() != self._saved_snapshot
+
+    def confirm_leave(self) -> bool:
+        """True when it is safe to leave this session: nothing unsaved, or the
+        user chose to save or discard it."""
+        if not self.has_unsaved_changes():
+            return True
+        reply = QMessageBox.question(
+            self, "Unsaved labels",
+            f"Session {self._session_id} has label changes that are not saved.\n\n"
+            "Save them before leaving?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save)
+        if reply == QMessageBox.Save:
+            return self._save_labels()
+        return reply == QMessageBox.Discard
+
+    def _open_other_session(self, session_id: int):
+        if session_id == self._session_id:
+            return
+        if not self.confirm_leave():
+            self._refresh_nav()   # put the dropdowns back on this session
+            return
+        if self._playing:
+            self._toggle_play()
+        self.load_session(session_id)
+
+    def _step_session(self, delta: int):
+        ids = [s["id"] for s in self._nav_sessions]
+        if self._session_id not in ids:
+            return
+        i = ids.index(self._session_id) + delta
+        if 0 <= i < len(ids):
+            self._open_other_session(ids[i])
+
+    def _on_nav_participant(self, index: int):
+        code = self._nav_participant.itemData(index)
+        theirs = [s for s in self._nav_sessions if s["participant_code"] == code]
+        if not theirs:
+            return
+        # Land on the first session still waiting for labels, if any
+        todo = [s for s in theirs if s["status"] == "processed"]
+        self._open_other_session((todo or theirs)[0]["id"])
+
+    def _on_nav_session(self, index: int):
+        self._open_other_session(self._nav_session.itemData(index))
+
+    def _refresh_nav(self):
+        """Rebuild the session bar from the DB, selecting the open session."""
+        self._nav_sessions = [s for s in get_all_sessions()
+                              if s["status"] in ANNOTATABLE_STATUSES]
+        current = next((s for s in self._nav_sessions
+                        if s["id"] == self._session_id), None)
+        codes = list(dict.fromkeys(s["participant_code"] for s in self._nav_sessions))
+
+        self._nav_participant.blockSignals(True)
+        self._nav_session.blockSignals(True)
+        self._nav_participant.clear()
+        for code in codes:
+            theirs = [s for s in self._nav_sessions if s["participant_code"] == code]
+            done = sum(s["status"] != "processed" for s in theirs)
+            self._nav_participant.addItem(f"{code}  ({done}/{len(theirs)} labelled)", code)
+        self._nav_session.clear()
+        if current is not None:
+            self._nav_participant.setCurrentIndex(codes.index(current["participant_code"]))
+            for s in self._nav_sessions:
+                if s["participant_code"] != current["participant_code"]:
+                    continue
+                flagged = "  [FLAGGED]" if s["flagged"] else ""
+                self._nav_session.addItem(f"S{s['id']:03d}  [{s['status']}]{flagged}", s["id"])
+                if s["id"] == current["id"]:
+                    self._nav_session.setCurrentIndex(self._nav_session.count() - 1)
+        self._nav_participant.blockSignals(False)
+        self._nav_session.blockSignals(False)
+
+        ids = [s["id"] for s in self._nav_sessions]
+        pos = ids.index(self._session_id) if current is not None else -1
+        self._btn_prev_session.setEnabled(pos > 0)
+        self._btn_next_session.setEnabled(0 <= pos < len(ids) - 1)
+        self._lbl_nav_pos.setText(f"{pos + 1} of {len(ids)}" if pos >= 0 else "")
+
     def load_session(self, session_id: int):
         self._session_id = session_id
         self._start_mark = None
         self._end_mark = None
         self._update_mark_label()
         self._landmarks = {}
+
+        self._store.load([])
+        self._saved_snapshot = []
+        self._refresh_ann_list()
+        self._refresh_nav()
 
         session = get_session(session_id)
         video_path = resolve_data_path(session["video_path"])
@@ -308,6 +432,7 @@ class AnnotationScreen(QWidget):
 
         rows = get_annotations_for_session(session_id)
         self._store.load(rows)
+        self._saved_snapshot = self._snapshot()
         self._refresh_ann_list()
         self._update_undo_redo_buttons()
         self._show_frame(0)
@@ -479,9 +604,9 @@ class AnnotationScreen(QWidget):
             )
         self._timeline.set_labels(self._store.frame_labels(self._total_frames))
 
-    def _save_labels(self):
+    def _save_labels(self) -> bool:
         if not self._session_id:
-            return
+            return False
         session = get_session(self._session_id)
         participant = get_participant(session["participant_id"])
         p_code = participant["participant_code"]
@@ -496,7 +621,7 @@ class AnnotationScreen(QWidget):
                 "make that explicit, or label them first.)",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:
-                return
+                return False
 
         # Sync annotations to DB (delete all, re-insert from store)
         delete_annotations_for_session(self._session_id)
@@ -506,7 +631,10 @@ class AnnotationScreen(QWidget):
 
         self._store.save_to_csv(labels_path, self._total_frames)
         update_session(self._session_id, labels_path=labels_path, status="annotated")
+        self._saved_snapshot = self._snapshot()
+        self._refresh_nav()
         QMessageBox.information(self, "Saved", f"Labels saved to:\n{labels_path}")
+        return True
 
     def _export(self):
         if not self._session_id:
@@ -526,17 +654,22 @@ class AnnotationScreen(QWidget):
             out = export_session(self._session_id)
             QMessageBox.information(self, "Exported", f"Dataset exported to:\n{out}")
             update_session(self._session_id, status="exported")
+            self._refresh_nav()
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
     def _on_reextract(self):
         if not self._session_id:
             return
+        if not self.confirm_leave():
+            return
         if self._playing:
             self._toggle_play()
         self.reprocess_requested.emit(self._session_id)
 
     def _on_done(self):
+        if not self.confirm_leave():
+            return
         if self._playing:
             self._toggle_play()
         self.done.emit()

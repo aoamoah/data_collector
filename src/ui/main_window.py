@@ -168,6 +168,10 @@ class MainWindow(QMainWindow):
             self._processing.apply_config(self._config)
 
     def closeEvent(self, event):
+        if (self._stack.currentIndex() == PAGE_ANNOTATION
+                and not self._annotation.confirm_leave()):
+            event.ignore()
+            return
         self._recording.cleanup()
         self._annotation.cleanup()
         super().closeEvent(event)
